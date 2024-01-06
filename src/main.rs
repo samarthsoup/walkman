@@ -1,5 +1,5 @@
 use rodio::{Decoder, OutputStream, Sink, StreamError, PlayError, decoder::DecoderError};
-use std::{fs::File, io::{self, BufReader}, fmt, error::Error, thread, sync::mpsc, time::Duration};
+use std::{fs::File, io::{self, BufReader}, fmt, error::Error, thread, sync::mpsc};
 
 
 #[derive(Debug)]
@@ -48,53 +48,90 @@ impl From<PlayError> for ErrorKind {
 }
 
 enum InterruptMessage {
+    Play(String),
+    Stop,
     AudioFinished,
-    Exit,
 }
 
-fn play_mp3(file_path: &str, tx: mpsc::Sender<InterruptMessage>) -> Result<(), ErrorKind> {
+fn play_mp3(rx: mpsc::Receiver<InterruptMessage>, tx: mpsc::Sender<InterruptMessage>) -> Result<(), ErrorKind> {
     let (_stream, stream_handle) = OutputStream::try_default()?;
 
-    let file = File::open(file_path)?;
-    let source = Decoder::new(BufReader::new(file))?;
+    let mut sink: Option<Sink> = None;
 
-    let sink = Sink::try_new(&stream_handle)?;
-    sink.append(source);
-    sink.sleep_until_end();
+    for msg in rx {
+        match msg {
+            InterruptMessage::Play(file_path) => {
+                if let Some(ref s) = sink {
+                    s.stop();
+                }
+                let file = File::open(file_path)?;
+                let source = Decoder::new(BufReader::new(file))?;
+                
+                let s = Sink::try_new(&stream_handle)?;
+                s.append(source);
+                sink = Some(s);
+            },
+            InterruptMessage::Stop => {
+                if let Some(ref s) = sink {
+                    s.stop();
+                }
+                sink = None;
+            },
+            InterruptMessage::AudioFinished => {}
+        }
+    }
 
-    tx.send(InterruptMessage::AudioFinished).unwrap();
+    if let Some(ref s) = sink {
+        if !s.empty() {
+            thread::sleep(std::time::Duration::from_millis(100));
+        } else {
+            tx.send(InterruptMessage::AudioFinished).unwrap();
+            sink = None;
+        }
+    }
     Ok(())
 }
 
 fn main() {
-    let (tx, rx) = mpsc::channel();
+    let (audiotx, audiorx) = mpsc::channel();
+    let (maintx, mainrx) = mpsc::channel();
 
-    loop {
-        println!("enter the input of the song to play (or 'exit' to stop):");
+    let maintx_clone = maintx.clone();
+
+    thread::spawn(move || {
+        match play_mp3(audiorx, maintx_clone){
+            Ok(()) => println!("playing track"),
+            Err(e) => eprintln!("{}", e),
+        }
+    });
+
+    loop{
+        println!("enter the input of the song to play (or 'stop' to stop(or 'exit' to kill the program)):");
         let mut input = String::new();
         io::stdin().read_line(&mut input).expect("error 1: couldn't read line");
         let input = input.trim();
 
         match input {
+            command if command.starts_with("play ") => {
+                let file_path = format!(r"C:\Users\thesa\walkman\src\{}.mp3", command[5..].to_string());
+                audiotx.send(InterruptMessage::Play(file_path)).unwrap();
+            },
+            "stop" => {
+                audiotx.send(InterruptMessage::Stop).unwrap();
+            },
             "exit" => {
-                tx.send(InterruptMessage::Exit).unwrap();
                 break;
             },
-            _ => {
-                let file_path = format!(r"C:\Users\thesa\walkman\src\{}.mp3", input);
-                let tx_clone = tx.clone();
-                thread::spawn(move || {
-                    match play_mp3(&file_path, tx_clone){
-                        Ok(()) => println!("playing track"),
-                        Err(e) => eprintln!("{}", e),
-                    }
-                });
+            _ => println!("invalid command"),
+        }
+        if let Ok(notification) = mainrx.try_recv() {
+            match notification {
+                InterruptMessage::AudioFinished => {
+                    println!("Audio finished playing.");
+                },
+                InterruptMessage::Play(_) => {},
+                InterruptMessage::Stop => {},
             }
         }
-        match rx.recv_timeout(Duration::from_millis(100)) {
-            Ok(InterruptMessage::AudioFinished) => println!("exhausted the byte stream"),
-            Ok(InterruptMessage::Exit) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
-            Err(mpsc::RecvTimeoutError::Timeout) => continue,
-        }
-    }
+    }    
 }
