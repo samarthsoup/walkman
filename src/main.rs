@@ -1,51 +1,5 @@
-use rodio::{Decoder, OutputStream, Sink, StreamError, PlayError, decoder::DecoderError};
-use std::{fs::File, io::{self, BufReader, Write}, fmt, error::Error, thread, sync::mpsc};
-
-
-#[derive(Debug)]
-enum ErrorKind {
-    Io(io::Error),
-    Stream(StreamError),
-    Decoder(DecoderError),
-    Play(PlayError)
-}
-
-impl fmt::Display for ErrorKind {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            ErrorKind::Io(err) => write!(f, "io error: {}", err),
-            ErrorKind::Stream(err) => write!(f, "stream error: {}", err),
-            ErrorKind::Decoder(err) => write!(f, "decoder error: {}", err),
-            ErrorKind::Play(err) => write!(f, "play error: {}", err),
-        }
-    }
-}
-
-impl Error for ErrorKind {}
-
-impl From<io::Error> for ErrorKind {
-    fn from(err: io::Error) -> ErrorKind {
-        ErrorKind::Io(err)
-    }
-}
-
-impl From<StreamError> for ErrorKind {
-    fn from(err: StreamError) -> ErrorKind {
-        ErrorKind::Stream(err)
-    }
-}
-
-impl From<DecoderError> for ErrorKind {
-    fn from(err: DecoderError) -> Self {
-        ErrorKind::Decoder(err)
-    }
-}
-
-impl From<PlayError> for ErrorKind {
-    fn from(err: PlayError) -> Self {
-        ErrorKind::Play(err)
-    }
-}
+use rodio::{Decoder, OutputStream, Sink};
+use std::{fs::File, io::{self, BufReader, Write}, thread, sync::mpsc};
 
 enum InterruptMessage {
     Play(String),
@@ -54,10 +8,9 @@ enum InterruptMessage {
     Pause,
     Resume,
     AudioFinished,
-    UserError(String),
 }
 
-fn play_mp3(rx: mpsc::Receiver<InterruptMessage>, tx: mpsc::Sender<InterruptMessage>) -> Result<(), ErrorKind> {
+fn play_mp3(rx: mpsc::Receiver<InterruptMessage>, tx: mpsc::Sender<InterruptMessage>) -> Result<(), Box<dyn std::error::Error>> {
     let (_stream, stream_handle) = OutputStream::try_default()?;
 
     let mut sink: Option<Sink> = None;
@@ -68,20 +21,59 @@ fn play_mp3(rx: mpsc::Receiver<InterruptMessage>, tx: mpsc::Sender<InterruptMess
                 if let Some(ref s) = sink {
                     s.stop();
                 }
-                let file = File::open(file_path)?;
-                let source = Decoder::new(BufReader::new(file))?;
+                let file = match File::open(file_path){
+                    Ok(f) => f,
+                    Err(e) => {
+                        eprintln!("io error: {}", e);
+                        continue;
+                    }
+                };
+                let source = match Decoder::new(BufReader::new(file)){
+                    Ok(s) => s,
+                    Err(e) => {
+                        eprintln!("decoder error: {}", e);
+                        continue; 
+                    }
+                };
                 
-                let s = Sink::try_new(&stream_handle)?;
+                let s = match Sink::try_new(&stream_handle){
+                    Ok(s) => s,
+                    Err(e) => {
+                        eprintln!("sink error: {}", e);
+                        continue; 
+                    }
+                };
                 s.append(source);
                 sink = Some(s);
             },
             InterruptMessage::Queue(file_path) => {
                 if sink.is_none() {
-                    sink = Some(Sink::try_new(&stream_handle)?); 
+                    match Sink::try_new(&stream_handle) {
+                        Ok(s) => sink = Some(s),
+                        Err(e) => {
+                            eprintln!("Error creating Sink: {}", e);
+                            continue;
+                        }
+                    };
                 }
-                let file = File::open(file_path)?;
-                let source = Decoder::new(BufReader::new(file))?;
-                sink.as_ref().unwrap().append(source);
+                let file = match File::open(file_path){
+                    Ok(f) => f,
+                    Err(e) => {
+                        eprintln!("io error: {}", e);
+                        continue;
+                    }
+                };
+                match Decoder::new(BufReader::new(file)) {
+                    Ok(source) => {
+                        if let Some(ref s) = sink {
+                            s.append(source);
+                        }
+                    },
+                    Err(e) => {
+                        eprintln!("Decoder error: {}", e);
+                        continue;
+                    }
+                };
             },
             InterruptMessage::Stop => {
                 if let Some(ref s) = sink {
@@ -100,7 +92,6 @@ fn play_mp3(rx: mpsc::Receiver<InterruptMessage>, tx: mpsc::Sender<InterruptMess
                 }
             },
             InterruptMessage::AudioFinished => {},
-            InterruptMessage::UserError(_) => {},
         }
     }
 
@@ -116,35 +107,21 @@ fn play_mp3(rx: mpsc::Receiver<InterruptMessage>, tx: mpsc::Sender<InterruptMess
 }
 
 fn main() {
-    let (mut audiotx, mut audiorx) = mpsc::channel();
+    let (audiotx, audiorx) = mpsc::channel();
     let (maintx, mainrx) = mpsc::channel();
 
-    let mut maintx_clone = maintx.clone();
-    let maintx_clone1 = maintx.clone();
+    let maintx_clone = maintx.clone();
 
     thread::spawn(move || {
         match play_mp3(audiorx, maintx_clone){
             Ok(()) => {},
             Err(e) => {
                 eprintln!("{}", e);
-                maintx_clone1.send(InterruptMessage::UserError(e.to_string())).unwrap();
             }
         }
     });
 
     loop{
-        if let Ok(message) = mainrx.try_recv() {
-            match message {
-                InterruptMessage::UserError(_) => {},
-                InterruptMessage::AudioFinished => {},
-                InterruptMessage::Queue(_) => {},
-                InterruptMessage::Play(_) => {},
-                InterruptMessage::Stop => {},
-                InterruptMessage::Pause => {},
-                InterruptMessage::Resume => {},
-            }
-        }
-
         print!(": ");
         io::stdout().flush().unwrap();
 
@@ -158,20 +135,7 @@ fn main() {
         match input {
             command if command.starts_with("p ") => {
                 let file_path = format!(r"C:\Users\thesa\walkman\src\{}.mp3", command[2..].to_string());
-                if audiotx.send(InterruptMessage::Play(file_path)).is_err(){
-                    let new_channel = mpsc::channel();
-                    audiotx = new_channel.0;
-                    audiorx = new_channel.1;
-                    maintx_clone = maintx.clone();
-
-                    thread::spawn(move || {
-                        println!("new thread created");
-                        match play_mp3(audiorx, maintx_clone){
-                            Ok(()) => {},
-                            Err(e) => eprintln!("{}", e),
-                        }
-                    });
-                };
+                audiotx.send(InterruptMessage::Play(file_path)).unwrap();
             },
             command if command.starts_with("q ") => {
                 let file_path = format!(r"C:\Users\thesa\walkman\src\{}.mp3", command[2..].to_string());
