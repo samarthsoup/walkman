@@ -25,6 +25,8 @@ fn play_mp3(rx: mpsc::Receiver<InterruptMessage>, tx: mpsc::Sender<InterruptMess
                     Ok(f) => f,
                     Err(e) => {
                         eprintln!("io error: {}", e);
+                        print!(": ");
+                        io::stdout().flush().unwrap();
                         continue;
                     }
                 };
@@ -32,6 +34,8 @@ fn play_mp3(rx: mpsc::Receiver<InterruptMessage>, tx: mpsc::Sender<InterruptMess
                     Ok(s) => s,
                     Err(e) => {
                         eprintln!("decoder error: {}", e);
+                        print!(": ");
+                        io::stdout().flush().unwrap();
                         continue; 
                     }
                 };
@@ -40,6 +44,8 @@ fn play_mp3(rx: mpsc::Receiver<InterruptMessage>, tx: mpsc::Sender<InterruptMess
                     Ok(s) => s,
                     Err(e) => {
                         eprintln!("sink error: {}", e);
+                        print!(": ");
+                        io::stdout().flush().unwrap();
                         continue; 
                     }
                 };
@@ -51,7 +57,9 @@ fn play_mp3(rx: mpsc::Receiver<InterruptMessage>, tx: mpsc::Sender<InterruptMess
                     match Sink::try_new(&stream_handle) {
                         Ok(s) => sink = Some(s),
                         Err(e) => {
-                            eprintln!("Error creating Sink: {}", e);
+                            eprintln!("sink error(creation): {}", e);
+                            print!(": ");
+                            io::stdout().flush().unwrap();
                             continue;
                         }
                     };
@@ -60,6 +68,8 @@ fn play_mp3(rx: mpsc::Receiver<InterruptMessage>, tx: mpsc::Sender<InterruptMess
                     Ok(f) => f,
                     Err(e) => {
                         eprintln!("io error: {}", e);
+                        print!(": ");
+                        io::stdout().flush().unwrap();
                         continue;
                     }
                 };
@@ -70,7 +80,9 @@ fn play_mp3(rx: mpsc::Receiver<InterruptMessage>, tx: mpsc::Sender<InterruptMess
                         }
                     },
                     Err(e) => {
-                        eprintln!("Decoder error: {}", e);
+                        eprintln!("decoder error: {}", e);
+                        print!(": ");
+                        io::stdout().flush().unwrap();
                         continue;
                     }
                 };
